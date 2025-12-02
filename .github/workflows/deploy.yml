@@ -1,0 +1,106 @@
+name: Deploy to S3 and Invalidate CloudFront
+
+on:
+  push:
+    branches:
+      - release/dev
+      - release/production
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: "20"
+  AI_PROVIDER: "anthropic"
+  AI_MODEL: "claude-sonnet-4-5-20250929"
+
+  # AWS Configuration (shared across environments)
+  AWS_ACCESS_KEY_ID: "AKIASZMN2VGUL54X46QK"
+  AWS_REGION: "ap-southeast-1"
+
+  # Development Environment
+  DEV_S3_BUCKET_NAME: "aiot-drawio-dev"
+  DEV_CLOUDFRONT_DISTRIBUTION_ID: "E1GZOU957522YT"
+
+  # Production Environment
+  PROD_S3_BUCKET_NAME: "aiot-drawio"
+  PROD_CLOUDFRONT_DISTRIBUTION_ID: "E2FMKKXA4ZH70Y"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set environment variables
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/release/production" ]]; then
+            echo "ENVIRONMENT=production" >> $GITHUB_ENV
+            echo "S3_BUCKET_NAME=${{ env.PROD_S3_BUCKET_NAME }}" >> $GITHUB_ENV
+            echo "CLOUDFRONT_DISTRIBUTION_ID=${{ env.PROD_CLOUDFRONT_DISTRIBUTION_ID }}" >> $GITHUB_ENV
+          else
+            echo "ENVIRONMENT=development" >> $GITHUB_ENV
+            echo "S3_BUCKET_NAME=${{ env.DEV_S3_BUCKET_NAME }}" >> $GITHUB_ENV
+            echo "CLOUDFRONT_DISTRIBUTION_ID=${{ env.DEV_CLOUDFRONT_DISTRIBUTION_ID }}" >> $GITHUB_ENV
+          fi
+          echo "Deploying to: $ENVIRONMENT"
+          echo "S3 Bucket: $S3_BUCKET_NAME"
+          echo "CloudFront ID: $CLOUDFRONT_DISTRIBUTION_ID"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Next.js application
+        run: npm run build
+        env:
+          NODE_ENV: production
+          AI_PROVIDER: ${{ env.AI_PROVIDER }}
+          AI_MODEL: ${{ env.AI_MODEL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to S3
+        run: |
+          aws s3 sync ./out s3://${{ env.S3_BUCKET_NAME }} \
+            --delete \
+            --cache-control "public,max-age=31536000,immutable" \
+            --exclude "*.html" \
+            --exclude "*.json" \
+            --exclude "*.xml" \
+            --exclude "*.txt"
+
+          # Upload HTML, JSON, XML, and TXT files with shorter cache
+          aws s3 sync ./out s3://${{ env.S3_BUCKET_NAME }} \
+            --delete \
+            --cache-control "public,max-age=0,must-revalidate" \
+            --exclude "*" \
+            --include "*.html" \
+            --include "*.json" \
+            --include "*.xml" \
+            --include "*.txt"
+
+      - name: Invalidate CloudFront cache
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ env.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/*"
+
+      - name: Deployment summary
+        run: |
+          echo "✅ Deployment completed successfully!"
+          echo "Environment: ${{ env.ENVIRONMENT }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "S3 Bucket: ${{ env.S3_BUCKET_NAME }}"
+          echo "CloudFront Distribution: ${{ env.CLOUDFRONT_DISTRIBUTION_ID }}"
