@@ -1,0 +1,147 @@
+name: Deploy to EKS
+
+on:
+  push:
+    branches:
+      - release/dev
+      - release/production
+  workflow_dispatch:
+
+env:
+  AI_PROVIDER: "anthropic"
+  AI_MODEL: "claude-sonnet-4-5-20250929"
+  AWS_ACCESS_KEY_ID: "AKIASZMN2VGUL54X46QK"
+  AWS_REGION: "ap-southeast-1"
+
+jobs:
+  deploy-app:
+    name: Deploy Next.js App
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Prepare Stage
+        id: stage
+        run: |
+          if [[ ${{ github.ref }} =~ ^refs/heads/release/production.*$ ]]; then
+            echo "STAGE=prod" >> $GITHUB_OUTPUT
+            echo "TF_STAGE=prod" >> $GITHUB_OUTPUT
+            echo "STAGE_TAG=production" >> $GITHUB_OUTPUT
+            echo "KUBE_HOST=${{ secrets.KUBE_PROD_HOST }}" >> $GITHUB_OUTPUT
+            echo "KUBE_CERTIFICATE=${{ secrets.KUBE_PROD_CERTIFICATE }}" >> $GITHUB_OUTPUT
+          else
+            echo "STAGE=dev" >> $GITHUB_OUTPUT
+            echo "TF_STAGE=dev" >> $GITHUB_OUTPUT
+            echo "STAGE_TAG=dev" >> $GITHUB_OUTPUT
+            echo "KUBE_HOST=${{ secrets.KUBE_DEV_HOST }}" >> $GITHUB_OUTPUT
+            echo "KUBE_CERTIFICATE=${{ secrets.KUBE_DEV_CERTIFICATE }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set variables
+        id: vars
+        run: |
+          echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "eks_cluster=aiot-eks-${{ steps.stage.outputs.TF_STAGE }}-cluster" >> $GITHUB_OUTPUT
+          echo "ecr_repo=aiot-drawio-nextjs" >> $GITHUB_OUTPUT
+          echo "kube_deployment=deployment.apps/${{ steps.stage.outputs.TF_STAGE }}-aiot-drawio-deploy" >> $GITHUB_OUTPUT
+          echo "kube_namespace=aiot-drawio" >> $GITHUB_OUTPUT
+          echo "kube_job_path=/spec/template/spec/containers/0/image" >> $GITHUB_OUTPUT
+
+      - name: Install AWS CLI
+        uses: unfor19/install-aws-cli-action@v1
+        with:
+          version: 2
+
+      - name: Get EKS token
+        id: eks_token
+        env:
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          EKS_CLUSTER: ${{ steps.vars.outputs.eks_cluster }}
+        run: echo "value=$(aws --region ${{ env.AWS_REGION }} eks get-token --cluster-name $EKS_CLUSTER | tr -d '\n' | sed -E 's/^.*\"(k8s\-aws.*)\".*$/\1/')" >> $GITHUB_OUTPUT
+
+      - name: Build, tag, and push Docker image to Amazon ECR
+        id: build-push
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPO: ${{ steps.vars.outputs.ecr_repo }}
+          STAGE_TAG: ${{ steps.stage.outputs.STAGE_TAG }}
+          IMAGE_TAG: ${{ steps.vars.outputs.sha_short }}
+        run: |
+          # Build Docker image
+          docker build \
+            --build-arg NODE_ENV=production \
+            -t $ECR_REPO:latest \
+            -f Dockerfile .
+
+          # Tag images
+          docker tag $ECR_REPO:latest $ECR_REGISTRY/$ECR_REPO:$STAGE_TAG
+          docker tag $ECR_REPO:latest $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
+          docker tag $ECR_REPO:latest $ECR_REGISTRY/$ECR_REPO:latest
+
+          # Push to ECR
+          echo "Pushing image to ECR..."
+          docker push $ECR_REGISTRY/$ECR_REPO:$STAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPO:latest
+
+          echo "image=$ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Update Kubernetes deployment image
+        id: modify-deployment-k8s
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_HOST: ${{ steps.stage.outputs.KUBE_HOST }}
+          KUBE_CERTIFICATE: ${{ steps.stage.outputs.KUBE_CERTIFICATE }}
+          KUBE_TOKEN: ${{ steps.eks_token.outputs.value }}
+          KUBE_NAMESPACE: ${{ steps.vars.outputs.kube_namespace }}
+          KUBE_JOB_PATH: ${{ steps.vars.outputs.kube_job_path }}
+          KUBE_DEPLOYMENT: ${{ steps.vars.outputs.kube_deployment }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPO: ${{ steps.vars.outputs.ecr_repo }}
+          IMAGE_TAG: ${{ steps.vars.outputs.sha_short }}
+        with:
+          args: -n ${{ env.KUBE_NAMESPACE }} patch ${{ env.KUBE_DEPLOYMENT }} --type json -p="[{\"op\":\"replace\",\"path\":\"${{ env.KUBE_JOB_PATH }}\",\"value\":\"${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ env.IMAGE_TAG }}\"}]"
+
+      - name: Rollout restart deployment
+        id: restart-deployment-k8s
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_HOST: ${{ steps.stage.outputs.KUBE_HOST }}
+          KUBE_CERTIFICATE: ${{ steps.stage.outputs.KUBE_CERTIFICATE }}
+          KUBE_TOKEN: ${{ steps.eks_token.outputs.value }}
+          KUBE_NAMESPACE: ${{ steps.vars.outputs.kube_namespace }}
+          KUBE_DEPLOYMENT: ${{ steps.vars.outputs.kube_deployment }}
+        with:
+          args: -n ${{ env.KUBE_NAMESPACE }} rollout restart ${{ env.KUBE_DEPLOYMENT }}
+
+      - name: Deployment summary
+        run: |
+          echo "========================================"
+          echo "Deployment Summary"
+          echo "========================================"
+          echo "Environment: ${{ steps.stage.outputs.STAGE }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Commit: ${{ steps.vars.outputs.sha_short }}"
+          echo "ECR Image: ${{ steps.build-push.outputs.image }}"
+          echo "EKS Cluster: ${{ steps.vars.outputs.eks_cluster }}"
+          echo "Namespace: ${{ steps.vars.outputs.kube_namespace }}"
+          echo "Deployment: ${{ steps.vars.outputs.kube_deployment }}"
+          echo "========================================"
+          echo "Deployment Status:"
+          echo "  Build & Push: ${{ steps.build-push.outcome }}"
+          echo "  Update Image: ${{ steps.modify-deployment-k8s.outcome }}"
+          echo "  Rollout Restart: ${{ steps.restart-deployment-k8s.outcome }}"
+          echo "========================================"
