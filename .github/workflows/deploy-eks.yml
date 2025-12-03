@@ -40,13 +40,13 @@ jobs:
             echo "STAGE=prod" >> $GITHUB_OUTPUT
             echo "TF_STAGE=prod" >> $GITHUB_OUTPUT
             echo "STAGE_TAG=production" >> $GITHUB_OUTPUT
-            echo "KUBE_HOST=${{ secrets.KUBE_PROD_HOST }}" >> $GITHUB_OUTPUT
+            echo "KUBE_HOST=YOUR_PROD_CLUSTER_ENDPOINT.ap-southeast-1.eks.amazonaws.com" >> $GITHUB_OUTPUT
             echo "KUBE_CERTIFICATE=${{ secrets.KUBE_PROD_CERTIFICATE }}" >> $GITHUB_OUTPUT
           else
             echo "STAGE=dev" >> $GITHUB_OUTPUT
             echo "TF_STAGE=dev" >> $GITHUB_OUTPUT
             echo "STAGE_TAG=dev" >> $GITHUB_OUTPUT
-            echo "KUBE_HOST=${{ secrets.KUBE_DEV_HOST }}" >> $GITHUB_OUTPUT
+            echo "KUBE_HOST=DD48D83536AE8A35FCDBC074070CCBFE.gr7.ap-southeast-1.eks.amazonaws.com" >> $GITHUB_OUTPUT
             echo "KUBE_CERTIFICATE=${{ secrets.KUBE_DEV_CERTIFICATE }}" >> $GITHUB_OUTPUT
           fi
 
@@ -56,7 +56,7 @@ jobs:
           echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           echo "eks_cluster=aiot-eks-${{ steps.stage.outputs.TF_STAGE }}-cluster" >> $GITHUB_OUTPUT
           echo "ecr_repo=aiot-drawio-nextjs" >> $GITHUB_OUTPUT
-          echo "kube_deployment=deployment.apps/${{ steps.stage.outputs.TF_STAGE }}-aiot-drawio-deploy" >> $GITHUB_OUTPUT
+          echo "kube_deployment=deployment.apps/${{ steps.stage.outputs.TF_STAGE }}-drawio-deploy" >> $GITHUB_OUTPUT
           echo "kube_namespace=aiot-drawio" >> $GITHUB_OUTPUT
           echo "kube_job_path=/spec/template/spec/containers/0/image" >> $GITHUB_OUTPUT
 
